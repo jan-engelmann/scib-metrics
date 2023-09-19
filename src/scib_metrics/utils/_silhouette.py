@@ -7,7 +7,7 @@ import pandas as pd
 
 from ._dist import cdist
 from ._utils import get_ndarray
-
+from tqdm.auto import trange
 
 @jax.jit
 def _silhouette_reduce(
@@ -63,7 +63,7 @@ def _pairwise_distances_chunked(X: jnp.ndarray, chunk_size: int, reduce_fn: call
     n_chunks = jnp.ceil(n_samples / chunk_size).astype(int)
     intra_dists_all = []
     inter_dists_all = []
-    for i in range(n_chunks):
+    for i in trange(n_chunks, desc="_pairwise_distances_chunked", position=2, leave=False, colour="red"):
         start = i * chunk_size
         end = min((i + 1) * chunk_size, n_samples)
         intra_cluster_dists, inter_cluster_dists = reduce_fn(cdist(X[start:end], X), start=start)

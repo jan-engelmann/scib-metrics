@@ -14,6 +14,7 @@ from anndata import AnnData
 from plottable import ColumnDefinition, Table
 from plottable.cmap import normed_cmap
 from plottable.plots import bar
+from scipy.sparse import coo_matrix, csr_matrix
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
@@ -91,6 +92,62 @@ class MetricAnnDataAPI(Enum):
     pcr_comparison = lambda ad, fn: fn(ad.obsm[_X_PRE], ad.X, ad.obs[_BATCH], categorical=True)
     ilisi_knn = lambda ad, fn: fn(ad.obsp["90_distances"], ad.obs[_BATCH])
     kbet_per_label = lambda ad, fn: fn(ad.obsp["50_connectivities"], ad.obs[_BATCH], ad.obs[_LABELS])
+
+
+def _compute_connectivities_umap(
+    knn_indices,
+    knn_dists,
+    n_obs,
+    n_neighbors,
+    set_op_mix_ratio=1.0,
+    local_connectivity=1.0,
+):
+    """\
+    This is from umap.fuzzy_simplicial_set [McInnes18]_.
+
+    Given a set of data X, a neighborhood size, and a measure of distance
+    compute the fuzzy simplicial set (here represented as a fuzzy graph in
+    the form of a sparse matrix) associated to the data. This is done by
+    locally approximating geodesic distance at each point, creating a fuzzy
+    simplicial set for each such point, and then combining all the local
+    fuzzy simplicial sets into a global one via a fuzzy union.
+    """
+    with warnings.catch_warnings():
+        # umap 0.5.0
+        warnings.filterwarnings("ignore", message=r"Tensorflow not installed")
+        from umap.umap_ import fuzzy_simplicial_set
+
+    X = coo_matrix(([], ([], [])), shape=(n_obs, 1))
+    connectivities = fuzzy_simplicial_set(
+        X,
+        n_neighbors,
+        None,
+        None,
+        knn_indices=knn_indices,
+        knn_dists=knn_dists,
+        set_op_mix_ratio=set_op_mix_ratio,
+        local_connectivity=local_connectivity,
+    )
+
+    if isinstance(connectivities, tuple):
+        # In umap-learn 0.4, this returns (result, sigmas, rhos)
+        connectivities = connectivities[0]
+    # replaced this respective to scanpy:
+    # https://github.com/scverse/scanpy/blob/46969b4d30620b91c6013a21e155ce1fc802a225/scanpy/neighbors/__init__.py#L419
+    # https://github.com/rapidsai/cuml/blob/d7162cdea43b4a69bb4e12ea4801b0539788ad8c/python/cuml/neighbors/nearest_neighbors.pyx#L827
+    distances = knn_dists.ravel()
+
+    n_samples = knn_indices.shape[0]
+    indices = knn_indices.ravel()
+
+    n_nonzero = n_samples * n_neighbors
+    rowptr = np.arange(0, n_nonzero + 1, n_neighbors)
+
+    dist_sparse_csr = csr_matrix(
+        (distances, np.ravel(np.asarray(indices)), rowptr), shape=(n_samples, n_samples)
+    )
+    dist_sparse_csr.setdiag(0.)
+    return dist_sparse_csr, connectivities.tocsr()
 
 
 class Benchmarker:
@@ -190,7 +247,7 @@ class Benchmarker:
                 )
             indices, distances = neigh_output.indices, neigh_output.distances
             for n in self._neighbor_values:
-                sp_distances, sp_conns = sc.neighbors._compute_connectivities_umap(
+                sp_distances, sp_conns = _compute_connectivities_umap(
                     indices[:, :n], distances[:, :n], ad.n_obs, n_neighbors=n
                 )
                 ad.obsp[f"{n}_connectivities"] = sp_conns
